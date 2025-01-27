@@ -15,6 +15,8 @@ from io import BytesIO
 from django.contrib.auth.models import User
 from django_otp.plugins.otp_totp.models import TOTPDevice
 
+from models import Session, TwoFactorAuth, Recaptcha, Token, RefreshToken, Blacklist
+
 # Create your views here.
 
 
@@ -22,20 +24,20 @@ from django_otp.plugins.otp_totp.models import TOTPDevice
 def auth(request):
     if request.method == 'POST':
         data = json.loads(request.body)
+        user = data.get('user')
+        password = data.get('password')
 
         # * Validate Recaptcha
         token = data.get('recaptcha')
         if not token:
             return JsonResponse({'message': 'Recaptcha token is required'}, status=status.HTTP_400_BAD_REQUEST)
 
-        isValidate = validate_recaptcha(token)
+        #TODO: send user model
+        isValidate = validate_recaptcha(user=user, token=token)
         if not isValidate:
             return JsonResponse({'message': 'Recaptcha validation failed'}, status=status.HTTP_400_BAD_REQUEST)
 
         # * Validate User and Password
-        user = data.get('user')
-        password = data.get('password')
-
         if not user or not password:
             return JsonResponse({'message': 'User and Password are required'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -87,6 +89,30 @@ def two_factor_auth(request):
 
 
 @api_view(['POST'])
+def refresh_token(request):
+    if request.metodh == 'POST':
+        refresh_token = request.headers.get('Authorization')
+        if not refresh_token:
+            return JsonResponse({'message': 'Refresh Token is required'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            payload = jwt.decode(
+                refresh_token, config('REFRESH_TOKEN_SECRET_KEY'), algorithms=['HS256'])
+            if payload.get('type') != 'refresh':
+                return JsonResponse({'message': 'Invalid Token'}, status=status.HTTP_400_BAD_REQUEST)
+
+            user = User.objects.get(id=payload.get('user_id'))
+            access_token = generate_jwt_token()
+            refresh_token = generate_refresh_jwt_token()
+
+            return JsonResponse({'message': 'Token Refreshed', 'access_token': access_token, 'refresh_token': refresh_token}, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            return JsonResponse({'message': 'Invalid Token'}, status=status.HTTP_400_BAD_REQUEST)
+
+    return JsonResponse({'message': 'Method not allowed'}, status=status.HTTP_405_METHOD_NOT_ALLOWED)
+
+
+@api_view(['POST'])
 def logout(request):
     if request.method == 'POST':
         return JsonResponse({'message': 'Logout Success'}, status=status.HTTP_200_OK)
@@ -113,6 +139,9 @@ def generate_2fa_device(user: User) -> str:
     img.save(img_io)
     img_io.seek(0)
 
+    twoFactorAuth = TwoFactorAuth.objects.create(user=user, secret=secret)
+    twoFactorAuth.save()
+
     return JsonResponse({'message': 'QR Code generated', 'qr_code': img_io}, status=status.HTTP_200_OK)
 
 
@@ -125,15 +154,21 @@ def validate_2fa_device(user: User) -> bool:
         return False
 
 
-def validate_recaptcha(token):
+def validate_recaptcha(user: User, token):
     response = requests.post('https://www.google.com/recaptcha/api/siteverify', data={
         'secret': config('RECAPTCHA_SECRET_KEY'),
         'response': token
     })
     response_json = response.json()
     if response_json.get('success'):
+        recaptcha = Recaptcha.objects.create(
+            user=user, token=token, is_valid=True)
+        recaptcha.save()
         return True
     else:
+        recaptcha = Recaptcha.objects.create(
+            user=user, token=token, is_valid=False)
+        recaptcha.save()
         return False
 
 
@@ -147,4 +182,33 @@ def generate_jwt_token(data: dict, exp_minutes: int = 60) -> str:
         'exp': expiration_time
     }
     token = jwt.encode(payload, config('TOKEN_SECRET_KEY'), algorithm='HS256')
+
+    token_save = Token.objects.create(user=data.get('user'), token=token)
+    token_save.save()
+
     return token
+
+
+def generate_refresh_jwt_token(data: dict, exp_minutes: int = 60) -> str:
+    issued_at = datetime.datetime.utcnow()
+    expiration_time = issued_at + datetime.timedelta(minutes=exp_minutes)
+    payload = {
+        **data,
+        'id_token': str(uuid.uuid4()),
+        'iat': issued_at,
+        'exp': expiration_time,
+        'type': 'refresh'
+    }
+    token = jwt.encode(payload, config(
+        'REFRESH_TOKEN_SECRET_KEY'), algorithm='HS256')
+
+    refresh_token = RefreshToken.objects.create(
+        user=data.get('user'), refresh_token=token)
+    refresh_token.save()
+
+    return token
+
+
+def save_session(user: User, session_id: str) -> None:
+    session = Session.objects.create(user=user, session_id=session_id)
+    session.save()

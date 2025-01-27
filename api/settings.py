@@ -40,6 +40,7 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'django_otp.middleware.OTPMiddleware',
+    'api.middlewares.jwt_middleware.JWTAuthenticationMiddleware',
 ]
 
 ROOT_URLCONF = 'api.urls'
