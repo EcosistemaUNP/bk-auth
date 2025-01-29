@@ -9,6 +9,7 @@ class JWTAuthenticationMiddleware:
         self.get_response = get_response
 
     def __call__(self, request):
+        print(request.headers)
         auth_header = request.headers.get("Authorization", None)
 
         if auth_header:
