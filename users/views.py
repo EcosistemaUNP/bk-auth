@@ -10,16 +10,12 @@ from rest_framework.decorators import api_view
 from decouple import config
 
 import pyotp
-import qrcode
-from io import BytesIO
-import base64
 from django.contrib.auth.models import User
 from django_otp.plugins.otp_totp.models import TOTPDevice
 
-from .models import Session, TwoFactorAuth, Recaptcha, Token, RefreshToken, Blacklist
+from users.models.models_global import Session, TwoFactorAuth, Recaptcha, Token, RefreshToken, Blacklist, PerfilUsuario
 
-# Create your views here.
-
+from api.decorators.jwt_decorator import jwt_required
 
 @api_view(['POST'])
 def auth(request):
@@ -49,7 +45,7 @@ def auth(request):
         totp_device = validate_2fa_device(result)
         if not totp_device:
             qr_code = generate_2fa_device(result)
-            return JsonResponse({'message': 'User has no device', 'qr_code': qr_code}, status=status.HTTP_200_OK)
+            return JsonResponse({'message': 'User has no device', 'qr_code': qr_code, 'twoFARequired': True}, status=status.HTTP_200_OK)
 
         return JsonResponse({'message': 'Login Success', 'twoFARequired': True}, status=status.HTTP_200_OK)
 
@@ -90,6 +86,7 @@ def two_factor_auth(request):
 
 
 @api_view(['POST'])
+@jwt_required
 def refresh_token(request):
     if request.metodh == 'POST':
         refresh_token = request.headers.get('Authorization')
@@ -114,30 +111,34 @@ def refresh_token(request):
 
 
 @api_view(['POST'])
+@jwt_required
 def get_data(request):
     if request.method == 'POST':
-        access_token = request.headers.get('Authorization')
-        if not access_token:
-            return JsonResponse({'message': 'Access Token is required'}, status=status.HTTP_400_BAD_REQUEST)
-
         try:
-            payload = jwt.decode(
-                access_token, config('TOKEN_SECRET_KEY'), algorithms=['HS256'])
-            if payload.get('type') != 'access':
-                return JsonResponse({'message': 'Invalid Token'}, status=status.HTTP_400_BAD_REQUEST)
+            user_info = request.user
+            username_field = 'preferred_username' if user_info.get('token_type') == 'microsoft' else 'username'
 
-            user = User.objects.get(id=payload.get('user_id'))
-            data = {'user': user.username, 'email': user.email}
+            basicos_usuario = PerfilUsuario.objects.filter(usuario=user_info.get(username_field)).last()
+            if not basicos_usuario:
+                return JsonResponse({'message': 'Required basic data', 'BdRequired': True}, status=status.HTTP_200_OK)
+  
+            datos_basicos = {
+                "dependencia": basicos_usuario.dependencia.nombre_dependencia,
+                "grupo": basicos_usuario.grupo.nombre_grupo,
+                "rol": basicos_usuario.rol.nombre_rol
+            }
 
-            return JsonResponse({'message': 'Data retrieved', 'data': data}, status=status.HTTP_200_OK)
-
+            user_token = generate_jwt_token(data={'datos_basicos': datos_basicos, 'address': request.META.get('REMOTE_ADDR'), 'type': 'data', 'user_type': 'external'}, exp_minutes=60)
+            
+            return JsonResponse({'message': 'Data retrieved', 'user_token': user_token}, status=status.HTTP_200_OK)
         except Exception as e:
-            return JsonResponse({'message': 'Invalid Token'}, status=status.HTTP_400_BAD_REQUEST)
+            return JsonResponse({'message': f'Error en la data {e}'}, status=status.HTTP_400_BAD_REQUEST)
         
     return JsonResponse({'message': 'Method not allowed'}, status=status.HTTP_405_METHOD_NOT_ALLOWED)
 
 
 @api_view(['POST'])
+@jwt_required
 def logout(request):
     if request.method == 'POST':
         return JsonResponse({'message': 'Logout Success'}, status=status.HTTP_200_OK)
@@ -188,16 +189,17 @@ def validate_recaptcha(user: User, token):
         'response': token
     })
     response_json = response.json()
+    
+    recaptcha = Recaptcha(user=user)
+    recaptcha.set_encrypted_token(token)
+    
     if response_json.get('success'):
-        recaptcha = Recaptcha.objects.create(
-            user=user, token=token, is_valid=True)
-        recaptcha.save()
-        return True
+        recaptcha.is_valid = True
     else:
-        recaptcha = Recaptcha.objects.create(
-            user=user, token=token, is_valid=False)
-        recaptcha.save()
-        return False
+        recaptcha.is_valid = False
+        
+    recaptcha.save()
+    return recaptcha.is_valid
 
 
 def generate_jwt_token(data: dict, exp_minutes: int = 60) -> str:
@@ -211,8 +213,11 @@ def generate_jwt_token(data: dict, exp_minutes: int = 60) -> str:
     }
     token = jwt.encode(payload, config('TOKEN_SECRET_KEY'), algorithm='HS256')
     user_instance = User.objects.get(username=data.get('username'))
-    token_save = Token.objects.create(user=user_instance, token=token)
-    token_save.save()
+
+    token_instance = Token(user=user_instance)
+    token_instance.set_encrypted_token(token)
+
+    token_instance.save()
 
     return token
 
@@ -230,9 +235,9 @@ def generate_refresh_jwt_token(data: dict, exp_minutes: int = 60) -> str:
     token = jwt.encode(payload, config(
         'REFRESH_TOKEN_SECRET_KEY'), algorithm='HS256')
 
-    refresh_token = RefreshToken.objects.create(
-        user=data.get('user'), refresh_token=token)
-    refresh_token.save()
+    refresh_token_instance = RefreshToken(user=data.get('user'))
+    refresh_token_instance.set_encrypted_token(token)
+    refresh_token_instance.save()
 
     return token
 
