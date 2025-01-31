@@ -139,6 +139,20 @@ def get_data(request):
 
 @api_view(['POST'])
 @jwt_required
+def validate(request):
+    if request.method == 'POST':
+        try:
+            user_info = request.user
+            if user_info:
+                return JsonResponse({'message': 'JWT validated'}, status=status.HTTP_200_OK)
+        except Exception as e:
+            return JsonResponse({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    return JsonResponse({'message': 'Method not allowed'}, status=status.HTTP_405_METHOD_NOT_ALLOWED)
+
+
+@api_view(['POST'])
+@jwt_required
 def logout(request):
     if request.method == 'POST':
         return JsonResponse({'message': 'Logout Success'}, status=status.HTTP_200_OK)
