@@ -30,6 +30,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'custom_auth',
     'users',
 ]
 
@@ -43,7 +44,6 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django_otp.middleware.OTPMiddleware',
-    # 'api.middlewares.jwt_middleware.JWTAuthenticationMiddleware',
 ]
 
 ROOT_URLCONF = 'api.urls'
