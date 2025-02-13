@@ -4,7 +4,8 @@ import datetime
 import uuid
 import jwt
 import pyotp
-from django.http import JsonResponse
+from django.conf import settings
+from django.http import HttpResponse, HttpResponseRedirect, JsonResponse
 from django.contrib.auth import authenticate
 from rest_framework import status
 from rest_framework.decorators import api_view
@@ -60,9 +61,15 @@ def two_factor_auth(request):
         if not code or not username:
             return JsonResponse({'message': 'Code or user is required'}, status=status.HTTP_400_BAD_REQUEST)
 
+        user_instance = User.objects.get(username=username)
+
+        existe_session = Session.objects.filter(
+            user=user_instance, is_active=True).exists()
+        if existe_session:
+            return JsonResponse({'message': 'Session active in other device'}, status=status.HTTP_400_BAD_REQUEST)
+
         # * Validate Code and Generate JWT
         try:
-            user_instance = User.objects.get(username=username)
             totp_device = TOTPDevice.objects.get(
                 user_id=user_instance, confirmed=True)
             totp = pyotp.TOTP(totp_device.key)
@@ -73,7 +80,23 @@ def two_factor_auth(request):
             access_token = generate_jwt_token(data={'username': username, 'address': request.META.get(
                 'REMOTE_ADDR'), 'type': 'access', 'user_type': 'external'}, exp_minutes=60)
 
-            return JsonResponse({'message': 'Login Success', 'access_token': access_token}, status=status.HTTP_200_OK)
+            response = JsonResponse(
+                {'message': 'Login Success'}, status=status.HTTP_200_OK)
+
+            response.set_cookie(
+                key='access_token',
+                value=access_token,
+                max_age=60 * 60,
+                expires=1,
+                secure=False,
+                httponly=True,
+                samesite='Lax',
+                path='/'
+            )
+
+            save_session(user_instance)
+
+            return response
 
         except TOTPDevice.DoesNotExist:
             return JsonResponse({'message': 'User has no device'}, status=status.HTTP_404_NOT_FOUND)
@@ -83,6 +106,30 @@ def two_factor_auth(request):
 
     return JsonResponse({'message': 'Method not allowed'}, status=status.HTTP_405_METHOD_NOT_ALLOWED)
 
+
+@api_view(['POST'])
+def microsoft_login(request):
+    if request.method == 'POST':
+        data = json.loads(request.body)
+        access_token = data.get('access_token')
+
+        response = JsonResponse(
+        {'message': 'Login Success'}, status=status.HTTP_200_OK)
+
+        response.set_cookie(
+            key='access_token',
+            value=access_token,
+            max_age=60 * 60,
+            expires=1,
+            secure=False,
+            httponly=True,
+            samesite='Lax',
+            path='/'
+        )
+        
+        return response
+
+    return JsonResponse({'message': 'Method not allowed'}, status=status.HTTP_405_METHOD_NOT_ALLOWED)
 
 @api_view(['POST'])
 @jwt_required
@@ -127,7 +174,26 @@ def validate(request):
 @jwt_required
 def logout(request):
     if request.method == 'POST':
-        return JsonResponse({'message': 'Logout Success'}, status=status.HTTP_200_OK)
+        data = json.loads(request.body)
+        username = data.get('username')
+
+        if not username:
+            return JsonResponse({'message': 'Code or user is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        user_instance = User.objects.get(username=username)
+
+        existe_session = Session.objects.filter(
+            user=user_instance, is_active=True).exists()
+        if existe_session:
+            session_instance = Session.objects.filter(
+                user=user_instance, is_active=True)
+            session_instance.is_active = False
+            session_instance.save()
+
+        response = JsonResponse(
+            {'message': 'Logout Success'}, status=status.HTTP_200_OK)
+        response.delete_cookie('access_token')
+        return response
 
     return JsonResponse({'message': 'Method not allowed'}, status=status.HTTP_405_METHOD_NOT_ALLOWED)
 
@@ -171,7 +237,7 @@ def validate_2fa_device(user: User) -> bool:
 
 
 def validate_recaptcha(user: User, token):
-    response = requests.post('https://www.google.com/recaptcha/api/siteverify', data={
+    response = requests.post(config('RECAPTCHA_API'), data={
         'secret': config('RECAPTCHA_SECRET_KEY'),
         'response': token
     })
@@ -229,6 +295,10 @@ def generate_refresh_jwt_token(data: dict, exp_minutes: int = 60) -> str:
     return token
 
 
-def save_session(user: User, session_id: str) -> None:
-    session = Session.objects.create(user=user, session_id=session_id)
-    session.save()
+def save_session(user: User) -> bool:
+    try:
+        session = Session.objects.create(user=user)
+        session.save()
+        return True
+    except:
+        return False
